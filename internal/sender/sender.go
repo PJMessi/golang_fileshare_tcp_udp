@@ -28,64 +28,69 @@ func (s *Sender) Handle(portStr string) error {
 	ctx, ctxCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer ctxCancel()
 
-	portInt, err := strconv.Atoi(portStr)
-	if err != nil || portInt < 0 {
+	discoveryPortInt, err := strconv.Atoi(portStr)
+	if err != nil || discoveryPortInt < 0 {
 		return fmt.Errorf("invalid port: %s", err)
 	}
-	port := uint(portInt)
 
-	// BROADCAST DISCOVERY MSG
+	// Broadcasts location.
 	go func() {
-		if err := s.broadcastDiscoverMsg(ctx, s.udpDiscoveryPort, port); err != nil {
+		log.Println("<=== STARTED BROADCASTING LOCATION ===>")
+		if err := s.broadcastLocation(ctx, s.udpDiscoveryPort, uint(discoveryPortInt)); err != nil {
 			log.Printf("err broadcasting discovery msg: %s", err)
 		}
+		log.Println("<=== STOPPED BROADCASTING LOCATION ===>")
 	}()
 
-	// CREATE A LISTENER
+	// Creates a listener for client requests.
 	listener, err := net.Listen("tcp", ":"+portStr)
 	if err != nil {
 		return fmt.Errorf("err starting listener: %s", err)
 	}
-	defer listener.Close()
-	log.Printf("listening on port: %s", portStr)
+	defer func() { _ = listener.Close() }()
+	log.Printf("<=== LISTENING FOR CLIENTS @ PORT: %s ===>", portStr)
 
-	// LISTEN FOR CLIENTS IN A LOOP
+	// Makes listener listen in a loop.
 	for {
 		con, err := listener.Accept()
 		if err != nil {
 			return fmt.Errorf("err accepting connection: %s", err)
 		}
-		log.Printf("connected to receiver: %s", con.RemoteAddr())
+		defer func() { _ = con.Close() }()
 
-		go s.sendFile(con)
+		log.Printf("<=== CONECTED TO A RECEIVER: %s ===>", con.RemoteAddr())
+		log.Printf("<=== STARTED FILE SENDING PROCESS ===>")
+
+		_ = s.sendFile(con)
 	}
 }
 
 func (s *Sender) sendFile(con net.Conn) error {
-	defer con.Close()
+	// Requests the source file path.
+	filepath, err := s.requestSourceFilePath()
+	if err != nil {
+		return fmt.Errorf("error while requesting the source filepath: %s", err)
+	}
 
-	// REQUEST FILE PATH
-	filepath := s.requestFilePath()
-
-	// LOAD THE FILE
+	// Loads the provided source file.
 	file, err := os.Open(filepath)
 	if err != nil {
 		log.Fatalf("err opening file: %s", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
-	// SEND FILE NAME SIZE
+	// Send the file name size first.
 	if err := s.sendFileNameSize(con, file); err != nil {
 		return fmt.Errorf("err sending file name size: %s", err)
 	}
 
-	// SEND FILE NAME
+	// Send the filename.
 	_, err = con.Write([]byte(filepath))
 	if err != nil {
 		log.Fatalf("err sending filename: %s", err)
 	}
 
-	// SEND FILE CONTENT
+	// Send the content.
 	if err := s.sendFileContent(con, file); err != nil {
 		return fmt.Errorf("err sending file content: %s", err)
 	}
@@ -94,41 +99,37 @@ func (s *Sender) sendFile(con net.Conn) error {
 }
 
 func (s *Sender) sendFileNameSize(con net.Conn, file *os.File) error {
-	fileName := file.Name()
-
-	fileNameLen := uint32(len(fileName))
-
+	fileNameLen := uint32(len(file.Name()))
 	if err := binary.Write(con, binary.LittleEndian, fileNameLen); err != nil {
 		return fmt.Errorf("err sending file name size: %s", err)
 	}
-
 	return nil
 }
 
+// sendFileContent sends the content of the file through the provided connection.
 func (s *Sender) sendFileContent(con net.Conn, file *os.File) error {
-	chunk := make([]byte, s.chunkSize)
+	// Holder for a file chunk.
+	chunkHolder := make([]byte, s.chunkSize)
 
 	totalBytesSent := 0
 	for {
-		// READ A CHUNK
-		bytesRead, err := file.Read(chunk)
+		// Read a chunk of the file and store in the chunk holder.
+		bytesRead, err := file.Read(chunkHolder)
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-
 			return fmt.Errorf("err reading file chunk: %s", err)
 		}
 
-		// SEND THE CHUNK
-		// Using con.Write(chunk[:n]) instead of con.Write(chunk) is important
-		// because the file.Read(chunk) function doesn’t always fill the buffer
-		// completely. It returns the actual number of bytes read, which can be
-		// less than the buffer size, especially in the last chunk or if the
-		// file is smaller than the buffer size. con.Write(chunk) would send the
-		// entire buffer, including any uninitialized or old data, leading to
-		// incorrect data transmission.
-		_, err = con.Write(chunk[:bytesRead])
+		// Send the chunk in the chunk holder.
+		// Using con.Write(chunk[:n]) instead of con.Write(chunk) is important because the
+		// file.Read(chunk) function doesn’t always fill the buffer completely. It returns the
+		// actual number of bytes read, which can be less than the buffer size, especially in the
+		// last chunk or if the file is smaller than the buffer size. con.Write(chunk) would send the
+		// entire buffer, including any uninitialized or old data, leading to incorrect data
+		// transmission.
+		_, err = con.Write(chunkHolder[:bytesRead])
 		if err != nil {
 			return fmt.Errorf("err sending file chunk: %s", err)
 		}
@@ -136,28 +137,32 @@ func (s *Sender) sendFileContent(con net.Conn, file *os.File) error {
 		totalBytesSent += bytesRead
 	}
 
-	log.Printf("sent %d bytes to receiver", totalBytesSent)
-
+	log.Printf("<=== BYTES SEND TO RECEIVER: %d ===>", totalBytesSent)
 	return nil
 }
 
-func (s *Sender) requestFilePath() string {
+// requestSourceFilePath requests the user for the file to send.
+func (s *Sender) requestSourceFilePath() (string, error) {
 	fmt.Println("enter the filepath: ")
 	var filepath string
 
-	fmt.Scanln(&filepath)
+	if _, err := fmt.Scanln(&filepath); err != nil {
+		return "", fmt.Errorf("error while scanning filepath: %s", err)
+	}
 
-	return filepath
+	return filepath, nil
 }
 
-func (s *Sender) broadcastDiscoverMsg(ctx context.Context, udpDiscoveryPort, port uint) error {
+// broadcastLocation broadcasts a discovery message every 2 seconds over UDP until the provided
+// context expires.
+func (s *Sender) broadcastLocation(ctx context.Context, udpDiscoveryPort, port uint) error {
 	udpBroadcastIp := fmt.Sprintf("255.255.255.255:%d", udpDiscoveryPort)
-	addr, err := net.ResolveUDPAddr("udp", udpBroadcastIp)
+	udpAddr, err := net.ResolveUDPAddr("udp", udpBroadcastIp)
 	if err != nil {
 		return fmt.Errorf("err resolving udp address: %s", err)
 	}
 
-	con, err := net.DialUDP("udp", nil, addr)
+	udpConn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
 		return fmt.Errorf("err dialing udp: %s", err)
 	}
@@ -165,16 +170,16 @@ func (s *Sender) broadcastDiscoverMsg(ctx context.Context, udpDiscoveryPort, por
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("stopped broadcasting")
 			return nil
+
 		default:
 			message := fmt.Sprintf("DISCOVER_SENDER: %d", port)
-			_, err := con.Write([]byte(message))
+			_, err := udpConn.Write([]byte(message))
 			if err != nil {
 				return fmt.Errorf("err sending discovery msg: %s", err)
 			}
 		}
 
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 }

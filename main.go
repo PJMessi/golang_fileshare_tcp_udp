@@ -23,17 +23,18 @@ func main() {
 	receiver := receiver.NewReceiver(chunkSize, udpDiscoveryPort)
 	sender := sender.NewSender(chunkSize, udpDiscoveryPort)
 
-	if purpose == "s" {
+	switch purpose {
+	case "s":
 		if err := sender.Handle(port); err != nil {
 			log.Fatalf("err starting sender: %s", err)
 		}
 
-	} else if purpose == "r" {
+	case "r":
 		if err := receiver.Handle(); err != nil {
 			log.Fatalf("err receiving file from the sender: %s", err)
 		}
 
-	} else {
+	default:
 		log.Println("invalid input")
 	}
 }
